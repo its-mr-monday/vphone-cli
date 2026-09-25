@@ -58,7 +58,15 @@ def _disasm(chunks, vma, n=60):
 
 
 def _find_error_gate(insns):
-    """The `cmn wR, #1; b.eq` sysctl-error idiom, preceded by a bl."""
+    """The `cmn wR, #1; b.eq` sysctl-error idiom, preceded by a bl.
+
+    The branch slot is also matched once it holds the NOP this patch writes.
+    Without that, a second pass over an already-installed cache never reaches
+    the byte comparison below — the idiom it searches for is the one the patch
+    has already replaced — and the patcher fails instead of reporting a no-op.
+    The `bl` + `cmn wR, #1` anchor is unchanged, so widening the slot does not
+    weaken where the match can land; re-writing a NOP over a NOP is inert.
+    """
     saw_bl = False
     for i in range(len(insns) - 1):
         if insns[i].mnemonic == "bl":
@@ -66,9 +74,9 @@ def _find_error_gate(insns):
         if not saw_bl:
             continue
         if insns[i].mnemonic == "cmn" and _imm(insns[i], 1) == 1:
-            beq = insns[i + 1]
-            if beq.mnemonic == "b.eq":
-                return beq
+            gate = insns[i + 1]
+            if gate.mnemonic in ("b.eq", "nop"):
+                return gate
     return None
 
 
@@ -90,13 +98,16 @@ def patch_lockdown_mode(chunks_dir, *, dry_run=False):
 
     gate = _find_error_gate(_disasm(chunks, fn_vma))
     if gate is None:
-        raise ValueError("lockdown_mode: `cmn wR,#1; b.eq <crash>` sysctl-error gate not found")
+        raise ValueError(
+            "lockdown_mode: `cmn wR,#1; b.eq <crash>` sysctl-error gate not found "
+            "(nor an already-NOPed one)"
+        )
     print(f"      [.] gate @ 0x{gate.address:X}: {gate.mnemonic} {gate.op_str}")
 
     nop = asm("nop")
     cur = chunks.bytes_at_vma(gate.address, 4)
     if cur == nop:
-        print("      [=] already patched")
+        print(f"      [=] already patched at 0x{gate.address:X}; nothing to patch/re-attest")
         return 1
     action = "would write" if dry_run else "wrote"
     print(f"      [+] {action} nop at 0x{gate.address:X} ({cur.hex()} -> {nop.hex()})")

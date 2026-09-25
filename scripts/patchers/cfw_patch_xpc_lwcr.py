@@ -149,6 +149,42 @@ def _find_consistency_check(insns):
     return None
 
 
+def _find_patched_shape(insns):
+    """Locate the shape this patch itself leaves behind, so a re-run reports a
+    no-op instead of failing.
+
+    The per-edit `already patched` check below cannot cover this: it compares
+    bytes at addresses that `_find_consistency_check` has to supply first, and
+    that search looks for the `eor`/`tbz` the patch has already replaced. On a
+    second pass over an installed cache the idiom is gone by construction.
+
+    Shape:
+        cmp   wX, #0     ; error_code == AICMR_MATCH
+        cset  w0, eq     ; the replacement for `cset wC, ne`
+        nop              ; was eor wE, w0, wC
+        nop              ; was tbz wE, #0, <abort>
+    """
+    for i in range(len(insns) - 2):
+        cset = insns[i]
+        if cset.mnemonic != "cset" or _rn(cset, 0) != "w0":
+            continue
+        if not cset.op_str.strip().endswith("eq"):
+            continue
+        if insns[i + 1].mnemonic != "nop" or insns[i + 2].mnemonic != "nop":
+            continue
+        # The `cmp wX, #0` feeding it keeps this from matching an unrelated
+        # `cset w0, eq` that happens to precede padding.
+        for j in range(i - 1, max(-1, i - 5), -1):
+            cand = insns[j]
+            if cand.mnemonic != "cmp":
+                continue
+            ops = cand.operands
+            if len(ops) == 2 and ops[1].type == ARM64_OP_IMM and ops[1].imm == 0:
+                return cset
+            break
+    return None
+
+
 def patch_xpc_lwcr(chunks_dir, *, dry_run=False):
     chunks = DSCChunks(chunks_dir)
     print(f"  [.] {chunks!r}")
@@ -172,6 +208,12 @@ def patch_xpc_lwcr(chunks_dir, *, dry_run=False):
     insns = _disasm_function(chunks, fn_vma)
     found = _find_consistency_check(insns)
     if found is None:
+        already = _find_patched_shape(insns)
+        if already is not None:
+            print(f"      [=] already patched at 0x{already.address:X} "
+                  f"(cset w0,eq; nop; nop); nothing to patch/re-attest")
+            print(f"  [+] libxpc LWCR self-check patch complete")
+            return 0
         raise ValueError(
             f"{SYMBOL}: LWCR consistency idiom (cset wC,ne; eor wE,w0,wC; "
             f"tbz wE,#0) not found"
