@@ -94,6 +94,7 @@ public final class KernelJBPatcher: KernelJBPatcherBase, Patcher {
             patchIomfbSwapEndVariableSize()      // dispatch checkStructureInputSize → variable
             patchIomfbSwapEndHandlerSize()       // handler cmp w2,#0x588 → 0x6e0
             patchFpfsScopedVnodeOpen()           // ops[267] → FileProvider-scoped trampoline (fpfs respring fix)
+            patchSharedRegionSize()               // 6 GiB → 8 GiB (iOS 27.0 DSC overflow)
         }
 
         return patches

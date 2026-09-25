@@ -47,30 +47,26 @@ public final class IBootJBPatcher: IBootPatcher {
             return false
         }
 
-        // For each ADD ref, scan forward up to 0x100 bytes for the pattern:
-        //   tbz/tbnz w0, #0, <target>
-        //   mov w0, #0
-        //   bl <anything>
+        // For each ADD ref, scan forward up to 0x100 bytes for:
+        //   Pattern A (26.x):  tbz/tbnz w0, #0, <target> ; mov w0, #0 ; bl
+        //   Pattern B (27.x):  tbz/tbnz w0, #0, <target> ; bl  (mov optimised out)
         for addOff in addOffsets {
             let scanLimit = min(addOff + 0x100, buffer.count - 12)
             var scan = addOff
             while scan <= scanLimit {
                 guard
                     let i0 = disasm.disassembleOne(in: buffer.data, at: scan),
-                    let i1 = disasm.disassembleOne(in: buffer.data, at: scan + 4),
-                    let i2 = disasm.disassembleOne(in: buffer.data, at: scan + 8)
+                    let i1 = disasm.disassembleOne(in: buffer.data, at: scan + 4)
                 else {
                     scan += 4
                     continue
                 }
 
-                // i0 must be tbz or tbnz
                 guard i0.mnemonic == "tbz" || i0.mnemonic == "tbnz" else {
                     scan += 4
                     continue
                 }
 
-                // i0 operands: [0]=reg (w0), [1]=bit (0), [2]=target address
                 guard
                     let detail0 = i0.aarch64,
                     detail0.operands.count >= 3,
@@ -83,19 +79,16 @@ public final class IBootJBPatcher: IBootPatcher {
                     continue
                 }
 
-                // i1 must be: mov w0, #0
-                guard i1.mnemonic == "mov", i1.operandString == "w0, #0" else {
+                // Accept both: tbz → mov w0,#0 → bl  (26.x) and  tbz → bl  (27.x)
+                let hasMov = i1.mnemonic == "mov" && i1.operandString == "w0, #0"
+                let checkInsn = hasMov
+                    ? disasm.disassembleOne(in: buffer.data, at: scan + 8)
+                    : i1
+                guard let nextInsn = checkInsn, nextInsn.mnemonic == "bl" else {
                     scan += 4
                     continue
                 }
 
-                // i2 must be bl
-                guard i2.mnemonic == "bl" else {
-                    scan += 4
-                    continue
-                }
-
-                // Branch target from tbz operand[2]
                 let target = Int(detail0.operands[2].imm)
 
                 guard let patchBytes = ARM64Encoder.encodeB(from: scan, to: target) else {
